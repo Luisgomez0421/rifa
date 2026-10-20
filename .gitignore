@@ -24,7 +24,10 @@ dist-ssr
 *.sln
 *.sw?
 
-# Environment variables (NEVER commit secrets!)
+# Environment variables & secrets (NEVER commit secrets!)
 .env
 .env.local
 .env.*.local
+.git-token
+*.token
+token.txt
