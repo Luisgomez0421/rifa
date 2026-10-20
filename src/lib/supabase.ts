@@ -1,18 +1,22 @@
 import { createClient } from '@supabase/supabase-js';
 
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || '';
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY || import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || '';
 
 export const isSupabaseConfigured = (): boolean => {
   if (!supabaseUrl || !supabaseAnonKey) return false;
-  if (supabaseUrl.includes('tu-proyecto') || supabaseAnonKey.includes('tu-anon-key')) return false;
+  if (supabaseUrl.includes('tu-proyecto') || supabaseAnonKey.includes('tu-clave-anon')) return false;
   if (!supabaseUrl.startsWith('https://')) return false;
   return true;
 };
 
-// Crear cliente solo si las credenciales mínimas existen; de lo contrario null
 export const supabase = isSupabaseConfigured()
-  ? createClient(supabaseUrl, supabaseAnonKey)
+  ? createClient(supabaseUrl, supabaseAnonKey, {
+      auth: {
+        persistSession: true,
+        autoRefreshToken: true,
+      },
+    })
   : null;
 
 export const testSupabaseConnection = async (): Promise<{ ok: boolean; message: string }> => {
@@ -24,17 +28,17 @@ export const testSupabaseConnection = async (): Promise<{ ok: boolean; message: 
   }
 
   try {
-    const { data, error } = await supabase.from('raffles').select('id, title').limit(1);
+    const { data, error } = await supabase.from('raffles').select('id, name, status').limit(1);
     if (error) {
       if (error.code === '42P01') {
         return {
           ok: false,
-          message: 'Supabase está conectado, pero la tabla "raffles" aún no existe. Debes ejecutar la migración SQL en el SQL Editor de Supabase.',
+          message: 'Supabase está conectado, pero la tabla "raffles" aún no existe. Debes ejecutar la migración en el SQL Editor de Supabase.',
         };
       }
       return {
         ok: false,
-        message: `Error de conexión: ${error.message} (Código: ${error.code})`,
+        message: `Error de consulta en Supabase: ${error.message} (${error.code})`,
       };
     }
     return {
@@ -44,7 +48,7 @@ export const testSupabaseConnection = async (): Promise<{ ok: boolean; message: 
   } catch (err: any) {
     return {
       ok: false,
-      message: `No se pudo conectar: ${err?.message || 'Error de red o CORS'}`,
+      message: `Error de red o CORS al intentar conectar con Supabase: ${err?.message || 'Desconocido'}`,
     };
   }
 };

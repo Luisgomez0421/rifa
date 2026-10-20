@@ -1,331 +1,578 @@
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
-import { Raffle, Ticket, ReservationRequest, ReservationResult } from '../types';
+import {
+  Raffle,
+  RaffleNumber,
+  Reservation,
+  ReservationRequest,
+  ReservationResponse,
+  DashboardMetrics,
+} from '../types';
 
-const STORAGE_KEY_RAFFLE = 'mi_gran_rifa_mock_raffle_v1';
-const STORAGE_KEY_TICKETS = 'mi_gran_rifa_mock_tickets_v1';
+const STORAGE_KEY_RAFFLE = 'mi_gran_rifa_v2_raffle';
+const STORAGE_KEY_NUMBERS = 'mi_gran_rifa_v2_numbers';
+const STORAGE_KEY_RESERVATIONS = 'mi_gran_rifa_v2_reservations';
 
-const DEFAULT_MOCK_RAFFLE: Raffle = {
+// Default initial active raffle
+const DEFAULT_RAFFLE: Raffle = {
   id: 'mock-raffle-001',
-  title: 'Gran Rifa Mi Gran Rifa - PlayStation 5',
-  description: 'Participa por un PlayStation 5 con 2 juegos o $3,500,000 COP en efectivo. Elige tus números de la suerte.',
-  ticket_price: 20000,
-  total_numbers: 100,
-  prize_title: 'PlayStation 5 Slim + 2 Juegos o Efectivo',
-  prize_image_url: 'https://images.unsplash.com/photo-1606813907291-d86efa9b94db?auto=format&fit=crop&w=800&q=80',
-  draw_date: new Date(Date.now() + 15 * 24 * 60 * 60 * 1000).toISOString(),
+  name: 'Mi Gran Rifa',
+  description: 'Sorteo oficial de 100 números con verificación transparente de pagos.',
+  prize_description: 'Premio pendiente de configuración por el administrador.',
+  price_cop: 10000,
   status: 'active',
-  terms: 'El sorteo se jugará con las 2 últimas cifras de la Lotería de Medellín una vez se complete el 100% de los números.',
+  hold_duration_minutes: 30,
 };
 
-const initMockTickets = (raffleId: string): Ticket[] => {
-  const tickets: Ticket[] = [];
+// Initialize 100 numbers (0 to 99) in mock mode
+const initMockNumbers = (raffleId: string): RaffleNumber[] => {
+  const numbers: RaffleNumber[] = [];
   for (let i = 0; i < 100; i++) {
-    const num = i.toString().padStart(2, '0');
-    // Pre-seed some mock statuses so the UI looks active in demo mode
-    let status: 'available' | 'reserved' | 'paid' = 'available';
-    let customer_name: string | null = null;
-    let customer_phone: string | null = null;
-    let reserved_at: string | null = null;
-    let expires_at: string | null = null;
-    let paid_at: string | null = null;
-
-    if (i === 7 || i === 23 || i === 88) {
-      status = 'paid';
-      customer_name = 'Carlos Mendoza';
-      customer_phone = '3001234567';
-      paid_at = new Date().toISOString();
-    } else if (i === 15 || i === 42) {
-      status = 'reserved';
-      customer_name = 'Ana Morales';
-      customer_phone = '3119876543';
-      reserved_at = new Date().toISOString();
-      expires_at = new Date(Date.now() + 12 * 60 * 1000).toISOString();
-    }
-
-    tickets.push({
-      id: `mock-ticket-${num}`,
+    numbers.push({
+      id: `mock-num-${i}`,
       raffle_id: raffleId,
-      number: num,
-      status,
-      customer_name,
-      customer_phone,
-      reserved_at,
-      expires_at,
-      paid_at,
+      number: i,
+      status: 'available',
+      reservation_id: null,
+      updated_at: new Date().toISOString(),
     });
   }
-  return tickets;
+  return numbers;
 };
 
-// Obtener la rifa activa
+// 1. Obtener la Rifa Activa
 export const getActiveRaffle = async (): Promise<Raffle> => {
   if (isSupabaseConfigured() && supabase) {
     try {
       const { data, error } = await supabase
         .from('raffles')
         .select('*')
+        .eq('status', 'active')
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle();
 
-      if (error) {
-        console.warn('Error al consultar rifa en Supabase, usando fallback local:', error.message);
-      } else if (data) {
+      if (!error && data) {
         return data as Raffle;
       }
     } catch (e) {
-      console.warn('Fallo de conexión en Supabase:', e);
+      console.warn('Fallo al obtener rifa de Supabase, usando almacenamiento local:', e);
     }
   }
 
-  // Fallback a localStorage / Demo
+  // Local fallback
   const saved = localStorage.getItem(STORAGE_KEY_RAFFLE);
   if (saved) {
     try {
       return JSON.parse(saved);
-    } catch {
-      // Ignorar error de parseo
-    }
+    } catch {}
   }
-  localStorage.setItem(STORAGE_KEY_RAFFLE, JSON.stringify(DEFAULT_MOCK_RAFFLE));
-  return DEFAULT_MOCK_RAFFLE;
+  localStorage.setItem(STORAGE_KEY_RAFFLE, JSON.stringify(DEFAULT_RAFFLE));
+  return DEFAULT_RAFFLE;
 };
 
-// Obtener los 100 números de la rifa
-export const getTickets = async (raffleId: string): Promise<Ticket[]> => {
+// 2. Obtener los 100 Números de la Rifa
+export const getRaffleNumbers = async (raffleId: string): Promise<RaffleNumber[]> => {
   if (isSupabaseConfigured() && supabase) {
     try {
-      // Primero intentar liberar boletos expirados si la función existe
+      // Liberar expirados primero
       try {
-        await supabase.rpc('release_expired_tickets', { p_raffle_id: raffleId });
-      } catch {
-        // Ignorar si la función aún no existe en BD
-      }
+        await supabase.rpc('expire_pending_reservations', { p_raffle_id: raffleId });
+      } catch {}
 
       const { data, error } = await supabase
-        .from('tickets')
+        .from('raffle_numbers')
         .select('*')
         .eq('raffle_id', raffleId)
         .order('number', { ascending: true });
 
-      if (error) {
-        console.warn('Error al consultar boletos en Supabase:', error.message);
-      } else if (data && data.length > 0) {
-        return data as Ticket[];
+      if (!error && data && data.length > 0) {
+        return data as RaffleNumber[];
       }
     } catch (e) {
-      console.warn('Fallo al obtener boletos de Supabase:', e);
+      console.warn('Fallo al obtener números de Supabase:', e);
     }
   }
 
-  // Fallback demo local
-  const saved = localStorage.getItem(STORAGE_KEY_TICKETS);
-  let tickets: Ticket[] = [];
+  // Local fallback
+  const saved = localStorage.getItem(STORAGE_KEY_NUMBERS);
+  let numbers: RaffleNumber[] = [];
   if (saved) {
     try {
-      tickets = JSON.parse(saved);
-    } catch {
-      tickets = [];
-    }
+      numbers = JSON.parse(saved);
+    } catch {}
   }
 
-  if (tickets.length !== 100) {
-    tickets = initMockTickets(raffleId);
-    localStorage.setItem(STORAGE_KEY_TICKETS, JSON.stringify(tickets));
+  if (numbers.length !== 100) {
+    numbers = initMockNumbers(raffleId);
+    localStorage.setItem(STORAGE_KEY_NUMBERS, JSON.stringify(numbers));
   } else {
-    // Limpiar expirados en local
-    const now = new Date();
-    let updated = false;
-    tickets = tickets.map((t) => {
-      if (t.status === 'reserved' && t.expires_at && new Date(t.expires_at) < now) {
-        updated = true;
-        return {
-          ...t,
-          status: 'available',
-          customer_name: null,
-          customer_phone: null,
-          customer_email: null,
-          payment_reference: null,
-          reserved_at: null,
-          expires_at: null,
-        };
-      }
-      return t;
-    });
-    if (updated) {
-      localStorage.setItem(STORAGE_KEY_TICKETS, JSON.stringify(tickets));
+    // Check local expirations
+    const now = Date.now();
+    const savedReservationsStr = localStorage.getItem(STORAGE_KEY_RESERVATIONS);
+    if (savedReservationsStr) {
+      try {
+        const reservations: Reservation[] = JSON.parse(savedReservationsStr);
+        let changed = false;
+
+        reservations.forEach((res) => {
+          if (res.status === 'reserved' && new Date(res.expires_at).getTime() < now) {
+            res.status = 'cancelled';
+            changed = true;
+            // Free associated numbers
+            numbers = numbers.map((n) =>
+              n.reservation_id === res.id ? { ...n, status: 'available', reservation_id: null } : n
+            );
+          }
+        });
+
+        if (changed) {
+          localStorage.setItem(STORAGE_KEY_RESERVATIONS, JSON.stringify(reservations));
+          localStorage.setItem(STORAGE_KEY_NUMBERS, JSON.stringify(numbers));
+        }
+      } catch {}
     }
   }
 
-  return tickets;
+  return numbers;
 };
 
-// Reservar un número
-export const reserveTicket = async (req: ReservationRequest): Promise<ReservationResult> => {
+// Mutex to simulate database row-level locking (SELECT ... FOR UPDATE) in asynchronous mock environment
+let mockReservationLock = Promise.resolve();
+
+const acquireMockLock = async (): Promise<() => void> => {
+  let release: () => void;
+  const nextLock = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const currentLock = mockReservationLock;
+  mockReservationLock = mockReservationLock.then(() => nextLock);
+  await currentLock;
+  return release!;
+};
+
+// 3. Crear Reserva Atómica (Múltiples Números, Protección de Concurrencia)
+export const createReservationAtomic = async (
+  req: ReservationRequest
+): Promise<ReservationResponse> => {
+  // 1. Validaciones inmediatas de entrada (iguales al RPC de PostgreSQL)
+  const cleanName = (req.full_name || '').trim();
+  const cleanPhone = (req.phone || '').replace(/[^0-9+]/g, '');
+
+  if (cleanName.length < 3) {
+    return { success: false, message: 'Por favor ingresa un nombre completo válido.' };
+  }
+
+  if (cleanPhone.length < 7 || cleanPhone.length > 15) {
+    return { success: false, message: 'Por favor ingresa un número de teléfono válido.' };
+  }
+
+  if (!req.numbers || req.numbers.length === 0) {
+    return { success: false, message: 'Debes seleccionar al menos un número disponible.' };
+  }
+
+  for (const num of req.numbers) {
+    if (num < 0 || num > 99) {
+      return { success: false, message: 'Los números deben estar entre 00 y 99.' };
+    }
+  }
+
+  if (new Set(req.numbers).size !== req.numbers.length) {
+    return {
+      success: false,
+      message: 'No puedes incluir el mismo número más de una vez en tu solicitud.',
+    };
+  }
+
   if (isSupabaseConfigured() && supabase) {
     try {
-      const { data, error } = await supabase.rpc('reserve_ticket', {
+      const { data, error } = await supabase.rpc('create_reservation_atomic', {
         p_raffle_id: req.raffle_id,
-        p_number: req.number,
-        p_customer_name: req.customer_name,
-        p_customer_email: req.customer_email,
-        p_customer_phone: req.customer_phone,
-        p_payment_reference: req.payment_reference || '',
-        p_hold_minutes: req.hold_minutes || 15,
+        p_full_name: cleanName,
+        p_phone: cleanPhone,
+        p_numbers: req.numbers,
       });
 
       if (error) {
         return {
           success: false,
-          message: error.message || 'Error al ejecutar reserva en Supabase',
+          message: error.message || 'Error al procesar la reserva en la base de datos.',
         };
       }
 
-      return data as ReservationResult;
+      return data as ReservationResponse;
     } catch (e: any) {
       return {
         success: false,
-        message: e?.message || 'Error de comunicación con Supabase',
+        message: e?.message || 'Error de red o comunicación con Supabase.',
       };
     }
   }
 
-  // Modo Demo / Local
-  const saved = localStorage.getItem(STORAGE_KEY_TICKETS);
-  let tickets: Ticket[] = saved ? JSON.parse(saved) : initMockTickets(req.raffle_id);
+  // ================= Local Mock Simulator (Serialized with Row-Lock Equivalent) =================
+  const releaseLock = await acquireMockLock();
+  try {
+    const numbersStr = localStorage.getItem(STORAGE_KEY_NUMBERS);
+    let numbers: RaffleNumber[] = numbersStr ? JSON.parse(numbersStr) : initMockNumbers(req.raffle_id);
 
-  const ticketIndex = tickets.findIndex((t) => t.number === req.number);
-  if (ticketIndex === -1) {
-    return { success: false, message: `El número ${req.number} no existe.` };
-  }
+    // Verify all requested numbers are available
+    for (const num of req.numbers) {
+      const found = numbers.find((n) => n.number === num);
+      if (!found || found.status !== 'available') {
+        return {
+          success: false,
+          message: 'Uno o varios números ya no están disponibles. Actualiza la cuadrícula e inténtalo nuevamente.',
+        };
+      }
+    }
 
-  const current = tickets[ticketIndex];
-  const now = new Date();
+    const raffle = await getActiveRaffle();
+    const unitPrice = raffle.price_cop;
+    const totalPrice = unitPrice * req.numbers.length;
+    const holdMinutes = raffle.hold_duration_minutes || 30;
+    const expiresAt = new Date(Date.now() + holdMinutes * 60 * 1000).toISOString();
+    const publicCode = 'R-' + Math.random().toString(36).substring(2, 10).toUpperCase();
+    const reservationId = 'res-' + Math.random().toString(36).substring(2, 10);
 
-  if (current.status === 'paid') {
-    return { success: false, message: `El número ${req.number} ya fue pagado.` };
-  }
-
-  if (current.status === 'reserved' && current.expires_at && new Date(current.expires_at) > now) {
-    return {
-      success: false,
-      message: `El número ${req.number} ya se encuentra reservado por otra persona.`,
+    const newReservation: Reservation = {
+      id: reservationId,
+      public_code: publicCode,
+      participant_id: 'part-' + Math.random().toString(36).substring(2, 10),
+      raffle_id: req.raffle_id,
+      status: 'reserved',
+      quantity: req.numbers.length,
+      unit_price_cop: unitPrice,
+      total_price_cop: totalPrice,
+      expires_at: expiresAt,
+      created_at: new Date().toISOString(),
+      participants: {
+        id: 'part-' + Math.random().toString(36).substring(2, 10),
+        full_name: cleanName,
+        phone: cleanPhone,
+      },
+      numbers: req.numbers.map((n) => n.toString().padStart(2, '0')),
     };
+
+    // Update numbers
+    numbers = numbers.map((n) =>
+      req.numbers.includes(n.number) ? { ...n, status: 'reserved', reservation_id: reservationId } : n
+    );
+
+    // Save reservations
+    const resSaved = localStorage.getItem(STORAGE_KEY_RESERVATIONS);
+    const reservations: Reservation[] = resSaved ? JSON.parse(resSaved) : [];
+    reservations.push(newReservation);
+
+    localStorage.setItem(STORAGE_KEY_NUMBERS, JSON.stringify(numbers));
+    localStorage.setItem(STORAGE_KEY_RESERVATIONS, JSON.stringify(reservations));
+
+    return {
+      success: true,
+      message: '¡Reserva creada exitosamente!',
+      public_code: publicCode,
+      reservation_id: reservationId,
+      quantity: req.numbers.length,
+      unit_price_cop: unitPrice,
+      total_price_cop: totalPrice,
+      expires_at: expiresAt,
+    };
+  } finally {
+    releaseLock();
   }
-
-  const expiresAt = new Date(Date.now() + (req.hold_minutes || 15) * 60 * 1000).toISOString();
-  tickets[ticketIndex] = {
-    ...current,
-    status: 'reserved',
-    customer_name: req.customer_name,
-    customer_email: req.customer_email,
-    customer_phone: req.customer_phone,
-    payment_reference: req.payment_reference || '',
-    reserved_at: now.toISOString(),
-    expires_at: expiresAt,
-  };
-
-  localStorage.setItem(STORAGE_KEY_TICKETS, JSON.stringify(tickets));
-
-  return {
-    success: true,
-    message: `Número ${req.number} reservado exitosamente.`,
-    ticket_id: current.id,
-    number: req.number,
-    expires_at: expiresAt,
-  };
 };
 
-// Confirmar pago de un boleto (Admin)
-export const confirmTicketPayment = async (ticketId: string): Promise<{ success: boolean; message: string }> => {
+// 4. Consultar Reserva por Código Público
+export const getReservationByCode = async (publicCode: string): Promise<Reservation | null> => {
+  const cleanCode = publicCode.trim().toUpperCase();
+
   if (isSupabaseConfigured() && supabase) {
     try {
-      const { data, error } = await supabase.rpc('confirm_ticket_payment', {
-        p_ticket_id: ticketId,
-      });
-      if (error) {
-        // Fallback a UPDATE directo si el usuario no creó la función RPC
-        const { error: updateErr } = await supabase
-          .from('tickets')
-          .update({ status: 'paid', paid_at: new Date().toISOString() })
-          .eq('id', ticketId);
-        if (updateErr) return { success: false, message: updateErr.message };
-        return { success: true, message: 'Pago confirmado exitosamente.' };
+      const { data, error } = await supabase
+        .from('reservations')
+        .select(`
+          *,
+          participants (id, full_name, phone)
+        `)
+        .eq('public_code', cleanCode)
+        .maybeSingle();
+
+      if (!error && data) {
+        // Query associated numbers
+        const { data: numData } = await supabase
+          .from('raffle_numbers')
+          .select('number')
+          .eq('reservation_id', data.id);
+
+        const formattedNumbers = (numData || []).map((n: { number: number }) =>
+          n.number.toString().padStart(2, '0')
+        );
+
+        return {
+          ...data,
+          numbers: formattedNumbers,
+        } as Reservation;
       }
+    } catch (e) {
+      console.warn('Error al buscar reserva por código en Supabase:', e);
+    }
+  }
+
+  // Local fallback
+  const resSaved = localStorage.getItem(STORAGE_KEY_RESERVATIONS);
+  if (!resSaved) return null;
+  try {
+    const reservations: Reservation[] = JSON.parse(resSaved);
+    const found = reservations.find((r) => r.public_code.toUpperCase() === cleanCode);
+    return found || null;
+  } catch {
+    return null;
+  }
+};
+
+// 5. Admin: Confirmar Pago de una Reserva
+export const confirmReservationPayment = async (
+  reservationId: string,
+  notes?: string
+): Promise<{ success: boolean; message: string }> => {
+  if (isSupabaseConfigured() && supabase) {
+    try {
+      const { data, error } = await supabase.rpc('confirm_reservation_payment', {
+        p_reservation_id: reservationId,
+        p_notes: notes || 'Confirmado por el administrador desde el panel.',
+      });
+
+      if (error) return { success: false, message: error.message };
       return data as { success: boolean; message: string };
     } catch (e: any) {
       return { success: false, message: e?.message || 'Error al confirmar pago' };
     }
   }
 
-  // Demo Local
-  const saved = localStorage.getItem(STORAGE_KEY_TICKETS);
-  if (!saved) return { success: false, message: 'Boletos no encontrados' };
+  // Local fallback
+  const resSaved = localStorage.getItem(STORAGE_KEY_RESERVATIONS);
+  const numSaved = localStorage.getItem(STORAGE_KEY_NUMBERS);
+  if (!resSaved || !numSaved) return { success: false, message: 'Datos no encontrados' };
 
-  let tickets: Ticket[] = JSON.parse(saved);
-  const idx = tickets.findIndex((t) => t.id === ticketId);
-  if (idx === -1) return { success: false, message: 'Boleto no encontrado' };
+  let reservations: Reservation[] = JSON.parse(resSaved);
+  let numbers: RaffleNumber[] = JSON.parse(numSaved);
 
-  tickets[idx] = {
-    ...tickets[idx],
-    status: 'paid',
-    paid_at: new Date().toISOString(),
-  };
+  const idx = reservations.findIndex((r) => r.id === reservationId);
+  if (idx === -1) return { success: false, message: 'Reserva no encontrada' };
 
-  localStorage.setItem(STORAGE_KEY_TICKETS, JSON.stringify(tickets));
-  return { success: true, message: `Pago confirmado para el boleto ${tickets[idx].number}` };
+  reservations[idx].status = 'paid';
+  reservations[idx].updated_at = new Date().toISOString();
+
+  numbers = numbers.map((n) =>
+    n.reservation_id === reservationId ? { ...n, status: 'paid', updated_at: new Date().toISOString() } : n
+  );
+
+  localStorage.setItem(STORAGE_KEY_RESERVATIONS, JSON.stringify(reservations));
+  localStorage.setItem(STORAGE_KEY_NUMBERS, JSON.stringify(numbers));
+
+  return { success: true, message: 'Pago confirmado exitosamente.' };
 };
 
-// Liberar un boleto manualmente (Admin)
-export const releaseTicket = async (ticketId: string): Promise<{ success: boolean; message: string }> => {
+// 6. Admin: Cancelar Reserva y Liberar Números
+export const cancelReservationAdmin = async (
+  reservationId: string,
+  reason?: string
+): Promise<{ success: boolean; message: string }> => {
   if (isSupabaseConfigured() && supabase) {
     try {
-      const { data, error } = await supabase.rpc('release_ticket_admin', {
-        p_ticket_id: ticketId,
+      const { data, error } = await supabase.rpc('cancel_reservation_admin', {
+        p_reservation_id: reservationId,
+        p_reason: reason || 'Cancelado por el administrador.',
       });
-      if (error) {
-        const { error: updateErr } = await supabase
-          .from('tickets')
-          .update({
-            status: 'available',
-            customer_name: null,
-            customer_email: null,
-            customer_phone: null,
-            payment_reference: null,
-            reserved_at: null,
-            expires_at: null,
-            paid_at: null,
-          })
-          .eq('id', ticketId);
-        if (updateErr) return { success: false, message: updateErr.message };
-        return { success: true, message: 'Boleto liberado correctamente.' };
-      }
+
+      if (error) return { success: false, message: error.message };
       return data as { success: boolean; message: string };
     } catch (e: any) {
-      return { success: false, message: e?.message || 'Error al liberar boleto' };
+      return { success: false, message: e?.message || 'Error al cancelar reserva' };
     }
   }
 
-  // Demo Local
-  const saved = localStorage.getItem(STORAGE_KEY_TICKETS);
-  if (!saved) return { success: false, message: 'Boletos no encontrados' };
+  // Local fallback
+  const resSaved = localStorage.getItem(STORAGE_KEY_RESERVATIONS);
+  const numSaved = localStorage.getItem(STORAGE_KEY_NUMBERS);
+  if (!resSaved || !numSaved) return { success: false, message: 'Datos no encontrados' };
 
-  let tickets: Ticket[] = JSON.parse(saved);
-  const idx = tickets.findIndex((t) => t.id === ticketId);
-  if (idx === -1) return { success: false, message: 'Boleto no encontrado' };
+  let reservations: Reservation[] = JSON.parse(resSaved);
+  let numbers: RaffleNumber[] = JSON.parse(numSaved);
 
-  tickets[idx] = {
-    ...tickets[idx],
-    status: 'available',
-    customer_name: null,
-    customer_email: null,
-    customer_phone: null,
-    payment_reference: null,
-    reserved_at: null,
-    expires_at: null,
-    paid_at: null,
+  const idx = reservations.findIndex((r) => r.id === reservationId);
+  if (idx === -1) return { success: false, message: 'Reserva no encontrada' };
+
+  reservations[idx].status = 'cancelled';
+  reservations[idx].updated_at = new Date().toISOString();
+
+  numbers = numbers.map((n) =>
+    n.reservation_id === reservationId ? { ...n, status: 'available', reservation_id: null } : n
+  );
+
+  localStorage.setItem(STORAGE_KEY_RESERVATIONS, JSON.stringify(reservations));
+  localStorage.setItem(STORAGE_KEY_NUMBERS, JSON.stringify(numbers));
+
+  return { success: true, message: 'Reserva cancelada y números liberados correctamente.' };
+};
+
+// 7. Admin: Métricas de Dashboard
+export const getAdminMetrics = async (
+  raffleId: string,
+  numbers: RaffleNumber[]
+): Promise<DashboardMetrics> => {
+  let availableCount = 0;
+  let reservedCount = 0;
+  let paidCount = 0;
+
+  numbers.forEach((n) => {
+    if (n.status === 'available') availableCount++;
+    else if (n.status === 'reserved') reservedCount++;
+    else if (n.status === 'paid') paidCount++;
+  });
+
+  const raffle = await getActiveRaffle();
+  const unitPrice = raffle.price_cop;
+  const confirmedRevenue = paidCount * unitPrice;
+  const pendingRevenue = reservedCount * unitPrice;
+  const occupancyPercent = Math.round(((paidCount + reservedCount) / 100) * 100);
+
+  // Reservations count
+  let reservationsCount = 0;
+  if (isSupabaseConfigured() && supabase) {
+    try {
+      const { count } = await supabase
+        .from('reservations')
+        .select('*', { count: 'exact', head: true })
+        .eq('raffle_id', raffleId);
+      reservationsCount = count || 0;
+    } catch {}
+  } else {
+    const resSaved = localStorage.getItem(STORAGE_KEY_RESERVATIONS);
+    if (resSaved) {
+      try {
+        reservationsCount = JSON.parse(resSaved).length;
+      } catch {}
+    }
+  }
+
+  return {
+    totalNumbers: 100,
+    availableCount,
+    reservedCount,
+    paidCount,
+    reservationsCount,
+    confirmedRevenue,
+    pendingRevenue,
+    occupancyPercent,
   };
+};
 
-  localStorage.setItem(STORAGE_KEY_TICKETS, JSON.stringify(tickets));
-  return { success: true, message: `El número ${tickets[idx].number} ahora está disponible.` };
+// 8. Admin: Listar todas las reservas
+export const getAdminReservations = async (raffleId: string): Promise<Reservation[]> => {
+  if (isSupabaseConfigured() && supabase) {
+    try {
+      const { data, error } = await supabase
+        .from('reservations')
+        .select(`
+          *,
+          participants (id, full_name, phone)
+        `)
+        .eq('raffle_id', raffleId)
+        .order('created_at', { ascending: false });
+
+      if (!error && data) {
+        // Query assigned numbers for each
+        const { data: allNums } = await supabase
+          .from('raffle_numbers')
+          .select('number, reservation_id')
+          .eq('raffle_id', raffleId)
+          .not('reservation_id', 'is', null);
+
+        const numMap = new Map<string, string[]>();
+        (allNums || []).forEach((row: { number: number; reservation_id: string }) => {
+          if (!numMap.has(row.reservation_id)) {
+            numMap.set(row.reservation_id, []);
+          }
+          numMap.get(row.reservation_id)!.push(row.number.toString().padStart(2, '0'));
+        });
+
+        return data.map((r: any) => ({
+          ...r,
+          numbers: numMap.get(r.id) || [],
+        })) as Reservation[];
+      }
+    } catch (e) {
+      console.warn('Error al obtener reservas admin de Supabase:', e);
+    }
+  }
+
+  // Local fallback
+  const resSaved = localStorage.getItem(STORAGE_KEY_RESERVATIONS);
+  if (!resSaved) return [];
+  try {
+    return JSON.parse(resSaved);
+  } catch {
+    return [];
+  }
+};
+
+// 9. Admin: Actualizar Configuración de la Rifa
+export const updateRaffleSettings = async (
+  raffleId: string,
+  updates: Partial<Raffle>
+): Promise<{ success: boolean; message: string }> => {
+  if (isSupabaseConfigured() && supabase) {
+    try {
+      const { error } = await supabase
+        .from('raffles')
+        .update({
+          ...updates,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', raffleId);
+
+      if (error) return { success: false, message: error.message };
+      return { success: true, message: 'Configuración guardada exitosamente.' };
+    } catch (e: any) {
+      return { success: false, message: e?.message || 'Error al actualizar configuración' };
+    }
+  }
+
+  // Local fallback
+  const saved = localStorage.getItem(STORAGE_KEY_RAFFLE);
+  const current: Raffle = saved ? JSON.parse(saved) : DEFAULT_RAFFLE;
+  const updated = { ...current, ...updates, updated_at: new Date().toISOString() };
+  localStorage.setItem(STORAGE_KEY_RAFFLE, JSON.stringify(updated));
+  return { success: true, message: 'Configuración guardada localmente.' };
+};
+
+// 10. Supabase Realtime Subscription Helper
+export const subscribeToRaffleNumbers = (
+  raffleId: string,
+  onUpdate: () => void
+): (() => void) => {
+  if (!isSupabaseConfigured() || !supabase) {
+    return () => {};
+  }
+
+  const channel = supabase
+    .channel(`realtime-raffle-${raffleId}`)
+    .on(
+      'postgres_changes',
+      {
+        event: '*',
+        schema: 'public',
+        table: 'raffle_numbers',
+        filter: `raffle_id=eq.${raffleId}`,
+      },
+      () => {
+        onUpdate();
+      }
+    )
+    .subscribe();
+
+  return () => {
+    if (supabase) {
+      supabase.removeChannel(channel);
+    }
+  };
 };
